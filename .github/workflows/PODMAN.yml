@@ -1,0 +1,143 @@
+
+name: Cortex Cloud Podman Scan
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CORTEX_API_KEY: ${{ secrets.CORTEX_API_KEY }}
+  CORTEX_API_KEY_ID: ${{ secrets.CORTEX_API_KEY_ID }}
+  CORTEX_API_URL: https://api-pcscortexcloud.xdr.us.paloaltonetworks.com
+  IMAGE_NAME: docerleo/pcc_sandbox_analysis:latest
+
+jobs:
+  cortex-cli-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq podman curl
+          node --version
+          podman --version
+
+      - name: Download Cortex CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          crtx_resp=$(curl -fsSL \
+            "${CORTEX_API_URL}/public_api/v1/unified-cli/releases/download-link?os=linux&architecture=amd64" \
+            -H "x-xdr-auth-id: ${CORTEX_API_KEY_ID}" \
+            -H "Authorization: ${CORTEX_API_KEY}")
+
+          crtx_url=$(echo "${crtx_resp}" | jq -r '.signed_url')
+
+          if [[ -z "${crtx_url}" || "${crtx_url}" == "null" ]]; then
+            echo "ERROR: Cortex CLI URL not returned"
+            exit 1
+          fi
+
+          curl -fsSL -o cortexcli "${crtx_url}"
+          chmod +x cortexcli
+          ./cortexcli --version
+
+      - name: Run Cortex CLI Code Scan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./cortexcli \
+            --api-base-url "${CORTEX_API_URL}" \
+            --api-key "${CORTEX_API_KEY}" \
+            --api-key-id "${CORTEX_API_KEY_ID}" \
+            code scan \
+            --directory "${GITHUB_WORKSPACE}" \
+            --repo-id "${GITHUB_REPOSITORY}" \
+            --branch "${GITHUB_REF_NAME}" \
+            --source "GITHUB_ACTIONS" \
+            --create-repo-if-missing
+
+      - name: Start Podman Socket
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOCKET_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          mkdir -p "${SOCKET_DIR}/podman"
+
+          nohup podman system service \
+            --time=0 \
+            "unix://${SOCKET_DIR}/podman/podman.sock" \
+            > /tmp/podman-service.log 2>&1 &
+
+          echo "PODMAN_SOCKET=${SOCKET_DIR}/podman/podman.sock" \
+            >> "$GITHUB_ENV"
+
+          echo "DOCKER_HOST=unix://${SOCKET_DIR}/podman/podman.sock" \
+            >> "$GITHUB_ENV"
+
+          for i in {1..20}; do
+            if [[ -S "${SOCKET_DIR}/podman/podman.sock" ]]; then
+              echo "Podman socket is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          cat /tmp/podman-service.log
+          exit 1
+
+      - name: Verify Podman API
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl -fsS \
+            --unix-socket "${PODMAN_SOCKET}" \
+            http://localhost/_ping
+
+          echo
+          podman info
+
+      - name: Pull Image Using Podman
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          podman pull "${IMAGE_NAME}"
+          podman image inspect "${IMAGE_NAME}"
+
+      - name: Run Cortex CLI Image Scan with Podman
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Using Podman socket: ${DOCKER_HOST}"
+
+          ./cortexcli \
+            --api-base-url "${CORTEX_API_URL}" \
+            --api-key "${CORTEX_API_KEY}" \
+            --api-key-id "${CORTEX_API_KEY_ID}" \
+            image scan \
+            --name "dmensah-test-new-2" \
+            --timeout 90 \
+            --docker-host "${DOCKER_HOST}" \
+            "${IMAGE_NAME}"
