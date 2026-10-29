@@ -137,7 +137,7 @@ jobs:
             --api-key "${CORTEX_API_KEY}" \
             --api-key-id "${CORTEX_API_KEY_ID}" \
             image scan \
-            --name "dmensah-test-new-PODMAN" \
+            --name "dmensah-test-new-podman" \
             --timeout 90 \
             --docker-host "${DOCKER_HOST}" \
             "${IMAGE_NAME}"
